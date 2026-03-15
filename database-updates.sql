@@ -1,7 +1,8 @@
 -- Execute este script no SQL Editor do seu Supabase para adicionar as novas funcionalidades de Caixa
 
--- 1. Adicionar coluna de método de pagamento na tabela de vendas
-ALTER TABLE sales ADD COLUMN IF NOT EXISTS payment_method text CHECK (payment_method IN ('dinheiro', 'cartao_credito', 'cartao_debito', 'pix'));
+-- 1. Adicionar coluna de método de pagamento e barcode na tabela de vendas
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS payment_method text CHECK (payment_method IN ('dinheiro', 'cartao_credito', 'cartao_debito', 'pix', 'misto'));
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS barcode text;
 
 -- 2. Criar tabela de controle de caixa (cash_registers)
 CREATE TABLE IF NOT EXISTS cash_registers (

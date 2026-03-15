@@ -2,11 +2,11 @@ export interface Product {
   id: number;
   name: string;
   category: string;
-  sku: string;
-  barcode?: string;
+  barcode: string;
   current_stock: number;
   min_stock: number;
   price: number;
+  unit: 'un' | 'kg';
   expiry_date: string;
   created_at: string;
 }
@@ -14,6 +14,7 @@ export interface Product {
 export interface Sale {
   id: number;
   product_id: number;
+  barcode?: string;
   product_name?: string;
   quantity: number;
   sale_date: string;
@@ -49,7 +50,7 @@ export interface AIInsight {
 
 export interface XMLProduct {
   name: string;
-  sku: string;
+  barcode: string;
   quantity: number;
   price: number;
   matchedProductId?: number;

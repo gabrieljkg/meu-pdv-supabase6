@@ -25,7 +25,12 @@ import {
   Upload,
   Link,
   FileCode,
-  Printer
+  Printer,
+  LogOut,
+  ClipboardList,
+  Save,
+  Scale,
+  Settings as SettingsIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -45,10 +50,22 @@ import {
 import { Product, Sale, AIInsight, XMLProduct, CashRegister } from './types';
 import { getAIInsights } from './services/geminiService';
 import { supabase } from './lib/supabase';
+import { Session } from '@supabase/supabase-js';
+import Auth from './components/Auth';
+import QRCode from 'react-qr-code';
 
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState<string | null>('loading');
   const [reportFilter, setReportFilter] = useState<'today' | 'week' | 'month' | 'year' | 'all'>('month');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'pos' | 'reports' | 'ai' | 'xml'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'pos' | 'reports' | 'ai' | 'xml' | 'audit' | 'settings'>('dashboard');
+  const [storeSettings, setStoreSettings] = useState({
+    name: 'NOME DO ESTABELECIMENTO',
+    document: 'CNPJ: 00.000.000/0001-00',
+    address: 'Rua Exemplo, 123 - Centro',
+    phone: '(00) 0000-0000',
+    message: 'Obrigado pela preferência!\nVolte sempre!'
+  });
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [cart, setCart] = useState<{product: Product, quantity: number}[]>([]);
@@ -68,21 +85,44 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [auditCounts, setAuditCounts] = useState<Record<number, number>>({});
+  const [isWeightModalOpen, setIsWeightModalOpen] = useState(false);
+  const [selectedProductForWeight, setSelectedProductForWeight] = useState<Product | null>(null);
+  const [weightInput, setWeightInput] = useState('');
   const [currentRegister, setCurrentRegister] = useState<CashRegister | null>(null);
   const [cashRegisters, setCashRegisters] = useState<CashRegister[]>([]);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [registerInitialBalance, setRegisterInitialBalance] = useState(0);
   const [registerFinalBalance, setRegisterFinalBalance] = useState(0);
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'dinheiro' | 'cartao_credito' | 'cartao_debito' | 'pix'>('dinheiro');
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'dinheiro' | 'cartao_credito' | 'cartao_debito' | 'pix' | 'misto'>('dinheiro');
+  const [mixedCashAmount, setMixedCashAmount] = useState<number>(0);
+  const [mixedCardAmount, setMixedCardAmount] = useState<number>(0);
+  const [mixedCardMethod, setMixedCardMethod] = useState<'cartao_credito' | 'cartao_debito' | 'pix'>('cartao_credito');
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
+  const [closedRegisterSummary, setClosedRegisterSummary] = useState<{
+    initialBalance: number;
+    salesMoney: number;
+    salesOther: number;
+    expectedBalance: number;
+    finalBalance: number;
+    difference: number;
+    closedAt: string;
+  } | null>(null);
+  const [receiptData, setReceiptData] = useState<{
+    items: { product: Product, quantity: number }[],
+    total: number,
+    paymentMethod: string,
+    date: string
+  } | null>(null);
   const [newProduct, setNewProduct] = useState({
     name: '',
     category: '',
-    sku: '',
     barcode: '',
     current_stock: 0,
     min_stock: 5,
     price: 0,
+    unit: 'un' as 'un' | 'kg',
     expiry_date: new Date().toISOString().split('T')[0]
   });
 
@@ -176,8 +216,56 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchData();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    const savedSettings = localStorage.getItem('storeSettings');
+    if (savedSettings) {
+      try {
+        setStoreSettings(JSON.parse(savedSettings));
+      } catch (e) {
+        console.error('Error parsing store settings', e);
+      }
+    }
+
+    return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (session) {
+      fetchData();
+      checkPaymentStatus(session.user.id);
+    } else {
+      setPaymentStatus('loading');
+    }
+  }, [session]);
+
+  const checkPaymentStatus = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('status_pagamento')
+        .eq('id', userId)
+        .single();
+      
+      if (error) {
+        console.error("Error fetching profile:", error);
+        setPaymentStatus('pending');
+      } else {
+        setPaymentStatus(data.status_pagamento || 'pending');
+      }
+    } catch (err) {
+      console.error("Error checking payment status:", err);
+      setPaymentStatus('pending');
+    }
+  };
 
   useEffect(() => {
     if (successMessage) {
@@ -217,16 +305,16 @@ export default function App() {
       const productData = {
         name: newProduct.name.trim(),
         category: newProduct.category.trim(),
-        sku: newProduct.sku.trim().toUpperCase(),
-        barcode: newProduct.barcode.trim(),
+        barcode: newProduct.barcode.trim().toUpperCase(),
         current_stock: Number(newProduct.current_stock),
         min_stock: Number(newProduct.min_stock),
         price: Number(newProduct.price),
+        unit: newProduct.unit,
         expiry_date: newProduct.expiry_date
       };
 
-      if (!productData.name || !productData.sku) {
-        throw new Error("Nome e SKU são obrigatórios.");
+      if (!productData.name || !productData.barcode) {
+        throw new Error("Nome e Código de Barras são obrigatórios.");
       }
 
       if (editingProduct) {
@@ -251,11 +339,11 @@ export default function App() {
       setNewProduct({
         name: '',
         category: '',
-        sku: '',
         barcode: '',
         current_stock: 0,
         min_stock: 5,
         price: 0,
+        unit: 'un' as 'un' | 'kg',
         expiry_date: new Date().toISOString().split('T')[0]
       });
       await fetchData();
@@ -280,11 +368,11 @@ export default function App() {
     setNewProduct({
       name: product.name,
       category: product.category,
-      sku: product.sku,
       barcode: product.barcode || '',
       current_stock: product.current_stock,
       min_stock: product.min_stock,
       price: product.price,
+      unit: product.unit || 'un',
       expiry_date: product.expiry_date
     });
     setIsModalOpen(true);
@@ -295,7 +383,6 @@ export default function App() {
     setNewProduct({
       name: '',
       category: '',
-      sku: '',
       barcode: '',
       current_stock: 0,
       min_stock: 5,
@@ -325,16 +412,16 @@ export default function App() {
           const prod = details[i].getElementsByTagName("prod")[0];
           if (prod) {
             const name = prod.getElementsByTagName("xProd")[0]?.textContent || "";
-            const sku = prod.getElementsByTagName("cProd")[0]?.textContent || "";
+            const barcode = prod.getElementsByTagName("cEAN")[0]?.textContent || prod.getElementsByTagName("cProd")[0]?.textContent || "";
             const quantity = parseFloat(prod.getElementsByTagName("qCom")[0]?.textContent || "0");
             const price = parseFloat(prod.getElementsByTagName("vUnCom")[0]?.textContent || "0");
             
-            // Try to match with existing product by SKU
-            const matched = products.find(p => p.sku === sku);
+            // Try to match with existing product by barcode
+            const matched = products.find(p => p.barcode === barcode);
 
             parsedProducts.push({
               name,
-              sku,
+              barcode,
               quantity,
               price,
               matchedProductId: matched?.id
@@ -436,6 +523,13 @@ export default function App() {
       return;
     }
 
+    if (product.unit === 'kg') {
+      setSelectedProductForWeight(product);
+      setWeightInput('');
+      setIsWeightModalOpen(true);
+      return;
+    }
+
     setCart(prev => {
       const existing = prev.find(item => item.product.id === product.id);
       if (existing) {
@@ -452,6 +546,38 @@ export default function App() {
       }
       return [...prev, { product, quantity: 1 }];
     });
+  };
+
+  const handleWeightSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedProductForWeight) return;
+
+    const weight = parseFloat(weightInput.replace(',', '.'));
+    if (isNaN(weight) || weight <= 0) {
+      setError("Peso inválido!");
+      return;
+    }
+
+    if (weight > selectedProductForWeight.current_stock) {
+      setError("Peso superior ao estoque disponível!");
+      return;
+    }
+
+    setCart(prev => {
+      const existing = prev.find(item => item.product.id === selectedProductForWeight.id);
+      if (existing) {
+        return prev.map(item => 
+          item.product.id === selectedProductForWeight.id 
+            ? { ...item, quantity: item.quantity + weight } 
+            : item
+        );
+      }
+      return [...prev, { product: selectedProductForWeight, quantity: weight }];
+    });
+
+    setIsWeightModalOpen(false);
+    setSelectedProductForWeight(null);
+    setWeightInput('');
   };
 
   const removeFromCart = (productId: number) => {
@@ -508,6 +634,22 @@ export default function App() {
         .eq('id', currentRegister.id);
       
       if (error) throw error;
+
+      const salesMoney = sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method === 'dinheiro').reduce((acc, s) => acc + s.total_price, 0);
+      const salesOther = sales.filter(s => s.cash_register_id === currentRegister.id && s.payment_method !== 'dinheiro').reduce((acc, s) => acc + s.total_price, 0);
+      const expectedBalance = currentRegister.initial_balance + salesMoney;
+      const difference = registerFinalBalance - expectedBalance;
+
+      setClosedRegisterSummary({
+        initialBalance: currentRegister.initial_balance,
+        salesMoney,
+        salesOther,
+        expectedBalance,
+        finalBalance: registerFinalBalance,
+        difference,
+        closedAt: new Date().toISOString()
+      });
+
       setCurrentRegister(null);
       setIsRegisterModalOpen(false);
       setSuccessMessage("Caixa fechado com sucesso!");
@@ -524,10 +666,22 @@ export default function App() {
       return;
     }
     
+    if (selectedPaymentMethod === 'misto') {
+      const totalMixed = mixedCashAmount + mixedCardAmount;
+      if (Math.abs(totalMixed - cartTotal) > 0.01) {
+        setError(`A soma dos valores (R$ ${totalMixed.toFixed(2)}) deve ser igual ao total da venda (R$ ${cartTotal.toFixed(2)}).`);
+        setTimeout(() => setError(null), 5000);
+        return;
+      }
+    }
+
     setIsProcessingSale(true);
     setError(null);
 
     try {
+      let remainingCash = selectedPaymentMethod === 'misto' ? mixedCashAmount : 0;
+      let remainingCard = selectedPaymentMethod === 'misto' ? mixedCardAmount : 0;
+
       // Process each item
       for (const item of cart) {
         // 1. Double check stock
@@ -543,19 +697,83 @@ export default function App() {
           throw new Error(`Estoque insuficiente para ${item.product.name}. Disponível: ${currentProd?.current_stock || 0}`);
         }
 
-        // 2. Create Sale Record
-        const { error: saleError } = await supabase
-          .from('sales')
-          .insert([{
-            product_id: item.product.id,
-            quantity: item.quantity,
-            total_price: item.product.price * item.quantity,
-            sale_date: new Date().toISOString(),
-            payment_method: selectedPaymentMethod,
-            cash_register_id: currentRegister?.id || null
-          }]);
+        const itemTotal = item.product.price * item.quantity;
 
-        if (saleError) throw saleError;
+        // 2. Create Sale Record
+        if (selectedPaymentMethod === 'misto') {
+          if (remainingCash >= itemTotal - 0.001) {
+            // Full cash
+            const { error: saleError } = await supabase.from('sales').insert([{
+              product_id: item.product.id,
+              barcode: String(item.product.barcode),
+              quantity: item.quantity,
+              total_price: itemTotal,
+              sale_date: new Date().toISOString(),
+              payment_method: 'dinheiro',
+              cash_register_id: currentRegister?.id || null
+            }]);
+            if (saleError) throw saleError;
+            remainingCash -= itemTotal;
+          } else if (remainingCash > 0.001) {
+            // Split
+            const cashPart = remainingCash;
+            const cardPart = itemTotal - cashPart;
+            const cashQty = item.quantity * (cashPart / itemTotal);
+            const cardQty = item.quantity * (cardPart / itemTotal);
+
+            const { error: saleError1 } = await supabase.from('sales').insert([{
+              product_id: item.product.id,
+              barcode: String(item.product.barcode),
+              quantity: cashQty,
+              total_price: cashPart,
+              sale_date: new Date().toISOString(),
+              payment_method: 'dinheiro',
+              cash_register_id: currentRegister?.id || null
+            }]);
+            if (saleError1) throw saleError1;
+
+            const { error: saleError2 } = await supabase.from('sales').insert([{
+              product_id: item.product.id,
+              barcode: String(item.product.barcode),
+              quantity: cardQty,
+              total_price: cardPart,
+              sale_date: new Date().toISOString(),
+              payment_method: mixedCardMethod,
+              cash_register_id: currentRegister?.id || null
+            }]);
+            if (saleError2) throw saleError2;
+
+            remainingCash = 0;
+            remainingCard -= cardPart;
+          } else {
+            // Full card
+            const { error: saleError } = await supabase.from('sales').insert([{
+              product_id: item.product.id,
+              barcode: String(item.product.barcode),
+              quantity: item.quantity,
+              total_price: itemTotal,
+              sale_date: new Date().toISOString(),
+              payment_method: mixedCardMethod,
+              cash_register_id: currentRegister?.id || null
+            }]);
+            if (saleError) throw saleError;
+            remainingCard -= itemTotal;
+          }
+        } else {
+          const { error: saleError } = await supabase
+            .from('sales')
+            .insert([{
+              product_id: item.product.id,
+              barcode: String(item.product.barcode),
+              quantity: item.quantity,
+              total_price: itemTotal,
+              sale_date: new Date().toISOString(),
+              payment_method: selectedPaymentMethod,
+              cash_register_id: currentRegister?.id || null
+            }]);
+
+          if (saleError) throw saleError;
+        }
 
         // 3. Update Product Stock
         const { error: stockError } = await supabase
@@ -566,8 +784,15 @@ export default function App() {
         if (stockError) throw stockError;
       }
 
+      setReceiptData({
+        items: [...cart],
+        total: cartTotal,
+        paymentMethod: selectedPaymentMethod === 'misto' ? `Misto (Dinheiro + ${mixedCardMethod.replace('_', ' ')})` : selectedPaymentMethod,
+        date: new Date().toISOString()
+      });
       setCart([]);
       setIsPaymentModalOpen(false);
+      setIsReceiptModalOpen(true);
       setSuccessMessage("Venda realizada com sucesso!");
       await fetchData();
     } catch (err: any) {
@@ -584,17 +809,90 @@ export default function App() {
     }
   };
 
+  const handlePrintReceipt = () => {
+    const printContent = document.getElementById('receipt-content');
+    if (!printContent) return;
+
+    const printWindow = window.open('', '_blank', 'width=400,height=600');
+    if (!printWindow) {
+      alert('Por favor, permita popups no seu navegador para imprimir o cupom.');
+      return;
+    }
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Cupom Fiscal</title>
+          <style>
+            body {
+              font-family: 'Courier New', Courier, monospace;
+              font-size: 12px;
+              margin: 0;
+              padding: 10px;
+              width: 80mm; /* Largura padrão de impressora térmica */
+              color: #000;
+            }
+            .text-center { text-align: center; }
+            .text-right { text-align: right; }
+            .text-left { text-align: left; }
+            .font-bold { font-weight: bold; }
+            .text-lg { font-size: 16px; }
+            .text-xs { font-size: 10px; }
+            .text-sm { font-size: 12px; }
+            .text-base { font-size: 14px; }
+            .mb-1 { margin-bottom: 4px; }
+            .mb-2 { margin-bottom: 8px; }
+            .mb-4 { margin-bottom: 16px; }
+            .mt-1 { margin-top: 4px; }
+            .mt-2 { margin-top: 8px; }
+            .mt-4 { margin-top: 16px; }
+            .py-1 { padding-top: 4px; padding-bottom: 4px; }
+            .pb-1 { padding-bottom: 4px; }
+            .pr-1 { padding-right: 4px; }
+            .w-full { width: 100%; }
+            .border-t { border-top: 1px dashed #000; }
+            .my-2 { margin-top: 8px; margin-bottom: 8px; }
+            .flex { display: flex; }
+            .justify-between { justify-content: space-between; }
+            .justify-center { justify-content: center; }
+            .items-center { align-items: center; }
+            .flex-col { flex-direction: column; }
+            .uppercase { text-transform: uppercase; }
+            .whitespace-pre-line { white-space: pre-line; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { vertical-align: top; }
+            @media print {
+              @page { margin: 0; }
+              body { margin: 0; padding: 10px; }
+            }
+          </style>
+        </head>
+        <body>
+          ${printContent.innerHTML}
+        </body>
+      </html>
+    `);
+
+    printWindow.document.close();
+    printWindow.focus();
+    
+    // Timeout to allow rendering before print dialog
+    setTimeout(() => {
+      printWindow.print();
+      printWindow.close();
+    }, 250);
+  };
+
   const cartTotal = cart.reduce((acc, item) => acc + (item.product.price * item.quantity), 0);
   
   const filteredProducts = products.filter(p => 
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    p.sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    p.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (p.barcode && p.barcode.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
   const filteredProductsForPOS = products.filter(p => 
     p.name.toLowerCase().includes(posSearch.toLowerCase()) || 
-    p.sku.toLowerCase().includes(posSearch.toLowerCase()) ||
     (p.barcode && p.barcode.toLowerCase().includes(posSearch.toLowerCase()))
   );
 
@@ -687,14 +985,168 @@ export default function App() {
   const totalSalesFiltered = filteredSalesForReport.reduce((acc, s) => acc + s.total_price, 0);
 
   const handlePrint = () => {
-    setSuccessMessage('Preparando impressão... Se a janela não abrir, tente abrir o aplicativo em uma nova aba.');
-    setTimeout(() => {
+    const printContent = document.getElementById('report-content');
+    if (!printContent) {
       window.print();
-    }, 1500);
+      return;
+    }
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('Por favor, permita popups no seu navegador para imprimir o relatório.');
+      return;
+    }
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Relatório VitalLog</title>
+          <style>
+            body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; color: #0f172a; }
+            .no-print { display: none !important; }
+            .print-only { display: block !important; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
+            th, td { border-bottom: 1px solid #e2e8f0; padding: 12px 8px; text-align: left; }
+            th { background-color: #f8fafc; font-weight: 600; color: #475569; }
+            .grid { display: grid; gap: 24px; }
+            .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+            .md\\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+            .lg\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .bg-white { background-color: #ffffff; }
+            .p-6 { padding: 24px; }
+            .p-8 { padding: 32px; }
+            .rounded-3xl { border-radius: 24px; }
+            .border { border: 1px solid #e2e8f0; }
+            .shadow-sm { box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); }
+            .text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
+            .text-2xl { font-size: 1.5rem; line-height: 2rem; }
+            .text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+            .font-bold { font-weight: 700; }
+            .font-black { font-weight: 900; }
+            .text-slate-500 { color: #64748b; }
+            .text-slate-400 { color: #94a3b8; }
+            .text-emerald-600 { color: #059669; }
+            .text-rose-600 { color: #e11d48; }
+            .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+            .text-xs { font-size: 0.75rem; line-height: 1rem; }
+            .mb-4 { margin-bottom: 1rem; }
+            .mb-8 { margin-bottom: 2rem; }
+            .mt-1 { margin-top: 0.25rem; }
+            .mt-8 { margin-top: 2rem; }
+            .flex { display: flex; }
+            .items-center { align-items: center; }
+            .justify-between { justify-content: space-between; }
+            .gap-2 { gap: 0.5rem; }
+            .gap-4 { gap: 1rem; }
+            .w-12 { width: 3rem; }
+            .h-12 { height: 3rem; }
+            .h-80 { height: 20rem; }
+            .w-full { width: 100%; }
+            .rounded-2xl { border-radius: 1rem; }
+            .bg-emerald-50 { background-color: #ecfdf5; }
+            .bg-sky-50 { background-color: #f0f9ff; }
+            .bg-indigo-50 { background-color: #eef2ff; }
+            .bg-amber-50 { background-color: #fffbeb; }
+            .bg-slate-50 { background-color: #f8fafc; }
+            .px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+            .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+            .rounded-full { border-radius: 9999px; }
+            .uppercase { text-transform: uppercase; }
+            .h-px { height: 1px; }
+            .bg-slate-200 { background-color: #e2e8f0; }
+            @media print {
+              body { padding: 0; }
+              .no-print { display: none !important; }
+              .print-only { display: block !important; }
+            }
+          </style>
+        </head>
+        <body>
+          ${printContent.innerHTML}
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    
+    // Wait a bit for charts (SVGs) to render if any
+    setTimeout(() => {
+      printWindow.print();
+    }, 500);
   };
+
+  const handleAuditSubmit = async () => {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const updates = Object.entries(auditCounts).map(([id, count]) => ({
+        id: parseInt(id),
+        current_stock: count
+      }));
+
+      for (const update of updates) {
+        const { error: updateError } = await supabase
+          .from('products')
+          .update({ current_stock: update.current_stock })
+          .eq('id', update.id);
+        
+        if (updateError) throw updateError;
+      }
+
+      setSuccessMessage("Inventário finalizado com sucesso!");
+      setAuditCounts({});
+      await fetchData();
+      setActiveTab('inventory');
+    } catch (err: any) {
+      console.error("Audit Error:", err);
+      setError(`Erro ao finalizar inventário: ${err.message}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  if (!session) {
+    return <Auth onLogin={() => {}} />;
+  }
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] flex text-slate-900 font-sans">
+      {/* Payment Status Modal */}
+      {paymentStatus === 'loading' && (
+        <div className="fixed inset-0 z-[9999] bg-slate-900/95 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-4">
+            <div className="w-12 h-12 border-4 border-sky-200 border-t-sky-600 rounded-full animate-spin"></div>
+            <p className="text-white font-medium">Verificando acesso...</p>
+          </div>
+        </div>
+      )}
+
+      {paymentStatus !== 'pago' && paymentStatus !== 'loading' && (
+        <div className="fixed inset-0 z-[9999] bg-slate-900/95 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl max-w-md w-full p-8 text-center shadow-2xl border border-slate-200">
+            <div className="w-20 h-20 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <AlertTriangle size={40} />
+            </div>
+            <h2 className="text-2xl font-black text-slate-900 mb-4">ASSINATURA VENCIDA</h2>
+            <p className="text-slate-600 mb-8 leading-relaxed">
+              Entre em contato com o suporte.
+            </p>
+            <div className="flex flex-col gap-3">
+              <button 
+                onClick={handleLogout}
+                className="w-full bg-slate-100 text-slate-600 font-bold py-4 px-6 rounded-xl hover:bg-slate-200 transition-colors"
+              >
+                Sair da Conta
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Success Message Toast */}
       <AnimatePresence>
         {successMessage && (
@@ -718,7 +1170,7 @@ export default function App() {
           <div className="w-10 h-10 bg-sky-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-sky-200">
             <Package size={24} />
           </div>
-          <h1 className="font-bold text-xl tracking-tight">StockSense AI</h1>
+          <h1 className="font-bold text-xl tracking-tight">VitalLog</h1>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-1">
@@ -733,6 +1185,12 @@ export default function App() {
             onClick={() => setActiveTab('inventory')}
             icon={<Package size={20} />}
             label="Estoque"
+          />
+          <NavItem 
+            active={activeTab === 'audit'} 
+            onClick={() => setActiveTab('audit')}
+            icon={<ClipboardList size={20} />}
+            label="Inventário"
           />
           <NavItem 
             active={activeTab === 'pos'} 
@@ -759,9 +1217,15 @@ export default function App() {
             icon={<FileCode size={20} />}
             label="Importar XML"
           />
+          <NavItem 
+            active={activeTab === 'settings'} 
+            onClick={() => setActiveTab('settings')}
+            icon={<SettingsIcon size={20} />}
+            label="Configurações"
+          />
         </nav>
 
-        <div className="p-4 border-t border-slate-100">
+        <div className="p-4 border-t border-slate-100 flex flex-col gap-2">
           <button 
             onClick={generateAIInsights}
             disabled={aiLoading}
@@ -770,11 +1234,18 @@ export default function App() {
             {aiLoading ? <RefreshCw size={18} className="animate-spin" /> : <BrainCircuit size={18} />}
             Prever Demanda
           </button>
+          <button 
+            onClick={handleLogout}
+            className="w-full flex items-center justify-center gap-2 bg-slate-50 text-slate-600 py-3 rounded-xl font-semibold hover:bg-rose-50 hover:text-rose-600 transition-colors"
+          >
+            <LogOut size={18} />
+            Sair
+          </button>
         </div>
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto print-container">
+      <main className="flex-1 overflow-y-auto print-container print:hidden">
         <header className="h-20 bg-white border-bottom border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10 no-print">
           <div className="relative w-96">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -1088,7 +1559,7 @@ export default function App() {
                     <table className="w-full text-left">
                       <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
                         <tr>
-                          <th className="px-6 py-4 font-semibold">SKU</th>
+                          <th className="px-6 py-4 font-semibold">Cód. Barras</th>
                           <th className="px-6 py-4 font-semibold">Produto</th>
                           <th className="px-6 py-4 font-semibold">Categoria</th>
                           <th className="px-6 py-4 font-semibold">Preço</th>
@@ -1100,14 +1571,14 @@ export default function App() {
                       <tbody className="divide-y divide-slate-100">
                         {filteredProducts.map(p => (
                           <tr key={p.id} className="hover:bg-slate-50 transition-colors group">
-                            <td className="px-6 py-4 font-mono text-xs text-slate-500">{p.sku}</td>
+                            <td className="px-6 py-4 font-mono text-xs text-slate-500">{p.barcode}</td>
                             <td className="px-6 py-4 font-bold">{p.name}</td>
                             <td className="px-6 py-4 text-slate-600">{p.category}</td>
-                            <td className="px-6 py-4 font-medium">R$ {p.price.toFixed(2)}</td>
+                            <td className="px-6 py-4 font-medium">R$ {p.price.toFixed(2)} / {p.unit || 'un'}</td>
                             <td className="px-6 py-4">
                               <div className="flex items-center gap-2">
                                 <span className={`w-2 h-2 rounded-full ${p.current_stock <= p.min_stock ? 'bg-rose-500' : 'bg-emerald-500'}`}></span>
-                                {p.current_stock} un.
+                                {p.unit === 'kg' ? p.current_stock.toFixed(3) : p.current_stock} {p.unit || 'un'}
                               </div>
                             </td>
                             <td className="px-6 py-4 text-slate-600">{new Date(p.expiry_date).toLocaleDateString('pt-BR')}</td>
@@ -1176,9 +1647,24 @@ export default function App() {
                           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
                           <input 
                             type="text" 
-                            placeholder="Pesquisar produto por nome, SKU ou código de barras..." 
+                            placeholder="Pesquisar produto por nome ou código de barras..." 
                             value={posSearch}
                             onChange={(e) => setPosSearch(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && posSearch.trim() !== '') {
+                                const exactMatch = products.find(p => p.barcode === posSearch.trim());
+                                if (exactMatch) {
+                                  addToCart(exactMatch);
+                                  setPosSearch('');
+                                } else if (filteredProductsForPOS.length === 1) {
+                                  addToCart(filteredProductsForPOS[0]);
+                                  setPosSearch('');
+                                } else if (filteredProductsForPOS.length === 0) {
+                                  setError("Produto não encontrado.");
+                                  setTimeout(() => setError(null), 3000);
+                                }
+                              }
+                            }}
                             className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all text-lg"
                           />
                         </div>
@@ -1206,10 +1692,10 @@ export default function App() {
                             </span>
                           </div>
                           <h4 className="font-bold text-lg group-hover:text-sky-600 transition-colors">{p.name}</h4>
-                          <p className="text-xs text-slate-400 font-mono mt-1">{p.sku}</p>
+                          <p className="text-xs text-slate-400 font-mono mt-1">{p.barcode}</p>
                         </div>
                         <div className="mt-4 flex items-center justify-between">
-                          <span className="text-xl font-black text-slate-900">R$ {p.price.toFixed(2)}</span>
+                          <span className="text-xl font-black text-slate-900">R$ {p.price.toFixed(2)} <span className="text-xs font-bold text-slate-400">/ {p.unit || 'un'}</span></span>
                           <div className="w-10 h-10 bg-sky-50 rounded-xl flex items-center justify-center text-sky-600 group-hover:bg-sky-600 group-hover:text-white transition-all">
                             <Plus size={20} />
                           </div>
@@ -1252,19 +1738,24 @@ export default function App() {
                       <div key={item.product.id} className="flex items-center gap-4 group">
                         <div className="flex-1">
                           <h5 className="font-bold text-sm leading-tight">{item.product.name}</h5>
-                          <p className="text-xs text-slate-400 mt-1">R$ {item.product.price.toFixed(2)} / un</p>
+                          <p className="text-xs text-slate-400 mt-1">R$ {item.product.price.toFixed(2)} / {item.product.unit || 'un'}</p>
                         </div>
                         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-lg">
                           <button 
                             onClick={() => updateCartQuantity(item.product.id, -1)}
-                            className="w-6 h-6 flex items-center justify-center hover:bg-white rounded transition-colors text-slate-600"
+                            disabled={item.product.unit === 'kg'}
+                            className={`w-6 h-6 flex items-center justify-center hover:bg-white rounded transition-colors text-slate-600 ${item.product.unit === 'kg' ? 'opacity-30 cursor-not-allowed' : ''}`}
                           >
                             -
                           </button>
-                          <span className="w-6 text-center text-xs font-bold">{item.quantity}</span>
+                          <span className="min-w-[40px] text-center text-xs font-bold">
+                            {item.product.unit === 'kg' ? item.quantity.toFixed(3) : item.quantity}
+                            {item.product.unit === 'kg' ? ' kg' : ''}
+                          </span>
                           <button 
                             onClick={() => updateCartQuantity(item.product.id, 1)}
-                            className="w-6 h-6 flex items-center justify-center hover:bg-white rounded transition-colors text-slate-600"
+                            disabled={item.product.unit === 'kg'}
+                            className={`w-6 h-6 flex items-center justify-center hover:bg-white rounded transition-colors text-slate-600 ${item.product.unit === 'kg' ? 'opacity-30 cursor-not-allowed' : ''}`}
                           >
                             +
                           </button>
@@ -1310,7 +1801,11 @@ export default function App() {
                         Limpar
                       </button>
                       <button 
-                        onClick={() => setIsPaymentModalOpen(true)}
+                        onClick={() => {
+                          setMixedCashAmount(0);
+                          setMixedCardAmount(cartTotal);
+                          setIsPaymentModalOpen(true);
+                        }}
                         disabled={isProcessingSale || cart.length === 0}
                         className={`flex-[2] py-4 text-white rounded-2xl font-bold text-lg transition-all shadow-lg flex items-center justify-center gap-3 ${
                           cart.length === 0 
@@ -1340,6 +1835,7 @@ export default function App() {
 
             {activeTab === 'reports' && (
               <motion.div 
+                id="report-content"
                 key="reports"
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -1382,7 +1878,7 @@ export default function App() {
                       <Package size={28} />
                     </div>
                     <div>
-                      <h1 className="text-2xl font-bold">Relatório StockSense AI</h1>
+                      <h1 className="text-2xl font-bold">Relatório VitalLog</h1>
                       <p className="text-slate-500">Gerado em {new Date().toLocaleString('pt-BR')}</p>
                     </div>
                   </div>
@@ -1580,7 +2076,10 @@ export default function App() {
                               {new Date(sale.sale_date).toLocaleString('pt-BR')}
                             </td>
                             <td className="px-6 py-4 font-bold">{sale.product_name}</td>
-                            <td className="px-6 py-4 text-slate-600">{sale.quantity} un.</td>
+                            <td className="px-6 py-4 text-slate-600">
+                              {Number.isInteger(sale.quantity) ? sale.quantity : sale.quantity.toFixed(3)} 
+                              {Number.isInteger(sale.quantity) ? ' un.' : ' kg'}
+                            </td>
                             <td className="px-6 py-4 font-black">R$ {sale.total_price.toFixed(2)}</td>
                             <td className="px-6 py-4">
                               <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-black uppercase rounded-full">Concluída</span>
@@ -1611,7 +2110,7 @@ export default function App() {
                   <div className="relative z-10 max-w-2xl">
                     <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/20 backdrop-blur-md rounded-full text-xs font-bold uppercase tracking-widest mb-6">
                       <BrainCircuit size={14} />
-                      IA StockSense Ativa
+                      IA VitalLog Ativa
                     </div>
                     <h2 className="text-4xl font-bold mb-4 leading-tight">Previsão de Demanda & Sugestões de Compra</h2>
                     <p className="text-sky-100 text-lg leading-relaxed">
@@ -1778,7 +2277,7 @@ export default function App() {
                         <table className="w-full text-left">
                           <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
                             <tr>
-                              <th className="px-6 py-4 font-bold">SKU (Nota)</th>
+                              <th className="px-6 py-4 font-bold">Cód. Barras (Nota)</th>
                               <th className="px-6 py-4 font-bold">Produto</th>
                               <th className="px-6 py-4 font-bold">Qtd</th>
                               <th className="px-6 py-4 font-bold">Status</th>
@@ -1788,7 +2287,7 @@ export default function App() {
                           <tbody className="divide-y divide-slate-100">
                             {xmlProducts.map((p, idx) => (
                               <tr key={idx} className="hover:bg-slate-50 transition-colors">
-                                <td className="px-6 py-4 font-mono text-xs text-slate-500">{p.sku}</td>
+                                <td className="px-6 py-4 font-mono text-xs text-slate-500">{p.barcode}</td>
                                 <td className="px-6 py-4">
                                   <div className="font-bold">{p.name}</div>
                                   <div className="text-xs text-slate-400">Preço Unit: R$ {p.price.toFixed(2)}</div>
@@ -1831,6 +2330,211 @@ export default function App() {
                           </tbody>
                         </table>
                       </div>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'audit' && (
+              <motion.div 
+                key="audit"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="space-y-8"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-3xl font-bold tracking-tight">Balanço de Inventário</h2>
+                    <p className="text-slate-500 mt-1">Realize a contagem física dos produtos e atualize o estoque do sistema.</p>
+                  </div>
+                  <button 
+                    onClick={handleAuditSubmit}
+                    disabled={isSaving || Object.keys(auditCounts).length === 0}
+                    className="bg-emerald-600 text-white px-8 py-3 rounded-2xl font-bold flex items-center gap-2 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 disabled:opacity-50"
+                  >
+                    {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Save size={20} />}
+                    Finalizar Inventário
+                  </button>
+                </div>
+
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+                  <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                    <div className="relative w-96">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                      <input 
+                        type="text" 
+                        placeholder="Filtrar produtos para contagem..." 
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 transition-all"
+                      />
+                    </div>
+                    <div className="text-sm text-slate-500 font-medium">
+                      {Object.keys(auditCounts).length} itens alterados
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
+                        <tr>
+                          <th className="px-6 py-4 font-bold">Produto</th>
+                          <th className="px-6 py-4 font-bold">Cód. Barras</th>
+                          <th className="px-6 py-4 font-bold">Estoque Atual</th>
+                          <th className="px-6 py-4 font-bold">Contagem Física</th>
+                          <th className="px-6 py-4 font-bold">Diferença</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredProducts.map(p => {
+                          const counted = auditCounts[p.id] !== undefined ? auditCounts[p.id] : p.current_stock;
+                          const diff = counted - p.current_stock;
+                          
+                          return (
+                            <tr key={p.id} className="hover:bg-slate-50 transition-colors">
+                              <td className="px-6 py-4">
+                                <div className="font-bold">{p.name}</div>
+                                <div className="text-xs text-slate-400">{p.category}</div>
+                              </td>
+                              <td className="px-6 py-4 font-mono text-xs text-slate-500">{p.barcode}</td>
+                              <td className="px-6 py-4 font-medium text-slate-600">
+                                {p.unit === 'kg' ? p.current_stock.toFixed(3) : p.current_stock} {p.unit || 'un'}
+                              </td>
+                              <td className="px-6 py-4">
+                                <input 
+                                  type="number"
+                                  step={p.unit === 'kg' ? "0.001" : "1"}
+                                  value={counted}
+                                  onChange={(e) => {
+                                    const val = p.unit === 'kg' ? parseFloat(e.target.value) : parseInt(e.target.value);
+                                    if (!isNaN(val)) {
+                                      setAuditCounts(prev => ({ ...prev, [p.id]: val }));
+                                    }
+                                  }}
+                                  className="w-24 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all font-bold"
+                                />
+                              </td>
+                              <td className="px-6 py-4">
+                                {diff !== 0 ? (
+                                  <span className={`font-bold ${diff > 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                    {diff > 0 ? '+' : ''}{p.unit === 'kg' ? diff.toFixed(3) : diff}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300">-</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+            {activeTab === 'settings' && (
+              <motion.div
+                key="settings"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between mb-8">
+                  <div>
+                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">Configurações</h2>
+                    <p className="text-slate-500 mt-1">Gerencie os dados do seu estabelecimento e recibos</p>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm max-w-2xl">
+                  <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+                    <Printer className="text-sky-600" size={24} />
+                    Dados do Cupom Fiscal
+                  </h3>
+                  
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Nome do Estabelecimento</label>
+                      <input 
+                        type="text" 
+                        value={storeSettings.name}
+                        onChange={e => setStoreSettings({...storeSettings, name: e.target.value})}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
+                      />
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-6">
+                      <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-2">CNPJ / CPF</label>
+                        <input 
+                          type="text" 
+                          value={storeSettings.document}
+                          onChange={e => setStoreSettings({...storeSettings, document: e.target.value})}
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-2">Telefone</label>
+                        <input 
+                          type="text" 
+                          value={storeSettings.phone}
+                          onChange={e => setStoreSettings({...storeSettings, phone: e.target.value})}
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Endereço</label>
+                      <input 
+                        type="text" 
+                        value={storeSettings.address}
+                        onChange={e => setStoreSettings({...storeSettings, address: e.target.value})}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-bold text-slate-700 mb-2">Mensagem de Rodapé</label>
+                      <textarea 
+                        value={storeSettings.message}
+                        onChange={e => setStoreSettings({...storeSettings, message: e.target.value})}
+                        rows={3}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all resize-none"
+                      />
+                    </div>
+
+                    <div className="pt-4 flex gap-4 border-t border-slate-100">
+                      <button 
+                        onClick={() => {
+                          localStorage.setItem('storeSettings', JSON.stringify(storeSettings));
+                          setSuccessMessage('Configurações salvas com sucesso!');
+                        }}
+                        className="flex-1 py-3 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-700 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Save size={20} />
+                        Salvar Configurações
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setReceiptData({
+                            items: [
+                              { product: { id: 1, name: 'Produto Exemplo 1', price: 15.50, unit: 'un', current_stock: 10, min_stock: 5, category: 'Teste', barcode: '7890000000001', expiry_date: '2026-12-31', created_at: '' }, quantity: 2 },
+                              { product: { id: 2, name: 'Produto Exemplo 2', price: 25.00, unit: 'kg', current_stock: 10, min_stock: 5, category: 'Teste', barcode: '7890000000002', expiry_date: '2026-12-31', created_at: '' }, quantity: 1.5 }
+                            ],
+                            total: 68.50,
+                            paymentMethod: 'dinheiro',
+                            date: new Date().toISOString()
+                          });
+                          setIsReceiptModalOpen(true);
+                        }}
+                        className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Printer size={20} />
+                        Testar Impressão
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1892,25 +2596,23 @@ export default function App() {
                       required
                       type="text" 
                       value={newProduct.category}
-                      onChange={e => setNewProduct({...newProduct, category: e.target.value})}
+                      onChange={e => {
+                        const category = e.target.value;
+                        const isFruit = category.toLowerCase().includes('fruta');
+                        setNewProduct({
+                          ...newProduct, 
+                          category, 
+                          unit: isFruit ? 'kg' : newProduct.unit
+                        });
+                      }}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
                       placeholder="Ex: Grãos"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-2">SKU</label>
-                    <input 
-                      required
-                      type="text" 
-                      value={newProduct.sku}
-                      onChange={e => setNewProduct({...newProduct, sku: e.target.value})}
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
-                      placeholder="Ex: ARR-001"
-                    />
-                  </div>
-                  <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">Código de Barras</label>
                     <input 
+                      required
                       type="text" 
                       value={newProduct.barcode}
                       onChange={e => setNewProduct({...newProduct, barcode: e.target.value})}
@@ -1923,8 +2625,9 @@ export default function App() {
                     <input 
                       required
                       type="number" 
+                      step={newProduct.unit === 'kg' ? "0.001" : "1"}
                       value={newProduct.current_stock}
-                      onChange={e => setNewProduct({...newProduct, current_stock: parseInt(e.target.value) || 0})}
+                      onChange={e => setNewProduct({...newProduct, current_stock: parseFloat(e.target.value) || 0})}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
                     />
                   </div>
@@ -1933,13 +2636,14 @@ export default function App() {
                     <input 
                       required
                       type="number" 
+                      step={newProduct.unit === 'kg' ? "0.001" : "1"}
                       value={newProduct.min_stock}
-                      onChange={e => setNewProduct({...newProduct, min_stock: parseInt(e.target.value) || 0})}
+                      onChange={e => setNewProduct({...newProduct, min_stock: parseFloat(e.target.value) || 0})}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-2">Preço (R$)</label>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">Preço de Venda (R$)</label>
                     <input 
                       required
                       type="number" 
@@ -1948,6 +2652,17 @@ export default function App() {
                       onChange={e => setNewProduct({...newProduct, price: parseFloat(e.target.value) || 0})}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
                     />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">Unidade de Medida</label>
+                    <select 
+                      value={newProduct.unit}
+                      onChange={e => setNewProduct({...newProduct, unit: e.target.value as 'un' | 'kg'})}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none transition-all"
+                    >
+                      <option value="un">Unidade (un)</option>
+                      <option value="kg">Quilograma (kg)</option>
+                    </select>
                   </div>
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">Data de Vencimento</label>
@@ -2133,6 +2848,85 @@ export default function App() {
 
       {/* Payment Modal */}
       <AnimatePresence>
+        {/* Weight Input Modal */}
+        <AnimatePresence>
+          {isWeightModalOpen && selectedProductForWeight && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden"
+              >
+                <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-sky-600 rounded-xl flex items-center justify-center text-white">
+                      <Scale size={20} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-xl">Pesar Produto</h3>
+                      <p className="text-xs text-slate-400 uppercase font-bold tracking-wider">{selectedProductForWeight.name}</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setIsWeightModalOpen(false)}
+                    className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <form onSubmit={handleWeightSubmit} className="p-8 space-y-6">
+                  <div className="text-center">
+                    <p className="text-sm text-slate-500 mb-2">Informe o peso em quilogramas (kg)</p>
+                    <div className="relative">
+                      <input 
+                        autoFocus
+                        required
+                        type="text"
+                        inputMode="decimal"
+                        value={weightInput}
+                        onChange={e => setWeightInput(e.target.value)}
+                        placeholder="0,000"
+                        className="w-full text-center text-5xl font-black py-6 bg-slate-50 border-2 border-slate-200 rounded-2xl focus:border-sky-500 focus:ring-4 focus:ring-sky-500/10 outline-none transition-all"
+                      />
+                      <span className="absolute right-6 top-1/2 -translate-y-1/2 text-2xl font-bold text-slate-400">kg</span>
+                    </div>
+                    <div className="mt-4 p-4 bg-sky-50 rounded-xl flex justify-between items-center">
+                      <span className="text-sky-700 font-medium">Preço por kg:</span>
+                      <span className="text-sky-900 font-bold text-lg">R$ {selectedProductForWeight.price.toFixed(2)}</span>
+                    </div>
+                    {weightInput && !isNaN(parseFloat(weightInput.replace(',', '.'))) && (
+                      <div className="mt-2 p-4 bg-emerald-50 rounded-xl flex justify-between items-center">
+                        <span className="text-emerald-700 font-medium">Subtotal:</span>
+                        <span className="text-emerald-900 font-bold text-xl">
+                          R$ {(selectedProductForWeight.price * parseFloat(weightInput.replace(',', '.'))).toFixed(2)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex gap-4">
+                    <button 
+                      type="button"
+                      onClick={() => setIsWeightModalOpen(false)}
+                      className="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                    >
+                      Cancelar
+                    </button>
+                    <button 
+                      type="submit"
+                      className="flex-[2] py-4 bg-sky-600 text-white rounded-2xl font-bold hover:bg-sky-700 transition-all shadow-lg shadow-sky-200"
+                    >
+                      Confirmar Peso
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         {isPaymentModalOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
             <motion.div 
@@ -2210,7 +3004,78 @@ export default function App() {
                   </div>
                   {selectedPaymentMethod === 'pix' && <CheckCircle2 className="text-sky-600" size={20} />}
                 </button>
+
+                <button 
+                  onClick={() => setSelectedPaymentMethod('misto')}
+                  className={`w-full flex items-center justify-between p-4 rounded-xl border-2 transition-all ${selectedPaymentMethod === 'misto' ? 'border-sky-500 bg-sky-50' : 'border-slate-100 hover:border-slate-200'}`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${selectedPaymentMethod === 'misto' ? 'bg-sky-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                      <PieChart size={20} />
+                    </div>
+                    <span className="font-bold text-slate-700">Pagamento Misto</span>
+                  </div>
+                  {selectedPaymentMethod === 'misto' && <CheckCircle2 className="text-sky-600" size={20} />}
+                </button>
               </div>
+
+              {selectedPaymentMethod === 'misto' && (
+                <div className="mb-8 p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-4">
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Valor em Dinheiro</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">R$</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        min="0"
+                        value={mixedCashAmount || ''}
+                        onChange={(e) => {
+                          const val = Math.max(0, parseFloat(e.target.value) || 0);
+                          setMixedCashAmount(val);
+                          setMixedCardAmount(Math.max(0, cartTotal - val));
+                        }}
+                        className="w-full pl-10 pr-4 py-2 bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none"
+                      />
+                    </div>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Valor em Cartão/PIX</label>
+                    <div className="relative mb-2">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">R$</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        min="0"
+                        value={mixedCardAmount || ''}
+                        onChange={(e) => {
+                          const val = Math.max(0, parseFloat(e.target.value) || 0);
+                          setMixedCardAmount(val);
+                          setMixedCashAmount(Math.max(0, cartTotal - val));
+                        }}
+                        className="w-full pl-10 pr-4 py-2 bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 outline-none"
+                      />
+                    </div>
+                    <select 
+                      value={mixedCardMethod}
+                      onChange={(e) => setMixedCardMethod(e.target.value as any)}
+                      className="w-full p-2 bg-white border border-slate-300 rounded-lg text-sm outline-none focus:border-sky-500"
+                    >
+                      <option value="cartao_credito">Cartão de Crédito</option>
+                      <option value="cartao_debito">Cartão de Débito</option>
+                      <option value="pix">PIX</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
+                    <span className="text-sm font-bold text-slate-500">Soma:</span>
+                    <span className={`font-bold ${(mixedCashAmount + mixedCardAmount).toFixed(2) === cartTotal.toFixed(2) ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      R$ {(mixedCashAmount + mixedCardAmount).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <button 
                 onClick={handleCheckout}
@@ -2224,6 +3089,221 @@ export default function App() {
                 )}
                 {isProcessingSale ? 'Processando...' : 'Confirmar Pagamento'}
               </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Receipt Modal */}
+      <AnimatePresence>
+        {isReceiptModalOpen && receiptData && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm print:static print:bg-white print:backdrop-blur-none print:p-0">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-white rounded-3xl p-8 max-w-sm w-full shadow-2xl print:shadow-none print:p-0 print:m-0 print:w-full print:max-w-none print:rounded-none"
+            >
+              <div className="print:hidden flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-slate-900">Comprovante de Venda</h3>
+                <button onClick={() => setIsReceiptModalOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Printable Area */}
+              <div id="receipt-content" className="font-mono text-sm text-black bg-white p-4 print:p-0 mx-auto" style={{ maxWidth: '300px' }}>
+                <div className="text-center mb-4">
+                  <h2 className="font-bold text-lg">{storeSettings.name}</h2>
+                  {storeSettings.document && <p className="text-xs">{storeSettings.document}</p>}
+                  {storeSettings.address && <p className="text-xs">{storeSettings.address}</p>}
+                  {storeSettings.phone && <p className="text-xs">{storeSettings.phone}</p>}
+                  <p className="text-xs mt-2 font-bold">RECIBO DE VENDA</p>
+                  <p className="text-xs">{new Date(receiptData.date).toLocaleString('pt-BR')}</p>
+                </div>
+
+                <div className="border-t border-dashed border-slate-400 my-2"></div>
+                
+                <table className="w-full text-xs mb-2">
+                  <thead>
+                    <tr className="text-left">
+                      <th className="pb-1">QTD</th>
+                      <th className="pb-1">DESCRIÇÃO</th>
+                      <th className="text-right pb-1">VL.UN</th>
+                      <th className="text-right pb-1">TOTAL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {receiptData.items.map((item, idx) => (
+                      <tr key={idx}>
+                        <td className="py-1 align-top">
+                          {item.product.unit === 'kg' ? item.quantity.toFixed(3) : item.quantity}
+                        </td>
+                        <td className="py-1 align-top pr-1">{item.product.name}</td>
+                        <td className="py-1 align-top text-right">
+                          {item.product.price.toFixed(2)}
+                        </td>
+                        <td className="py-1 align-top text-right">
+                          {(item.product.price * item.quantity).toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <div className="border-t border-dashed border-slate-400 my-2"></div>
+
+                <div className="flex justify-between font-bold text-base mb-1">
+                  <span>TOTAL R$</span>
+                  <span>{receiptData.total.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-xs mb-4">
+                  <span>Forma de Pagamento:</span>
+                  <span className="uppercase">{receiptData.paymentMethod.replace('_', ' ')}</span>
+                </div>
+
+                <div className="text-center text-xs mt-4 whitespace-pre-line">
+                  {storeSettings.message}
+                </div>
+
+                <div className="mt-6 flex flex-col items-center justify-center">
+                  <QRCode 
+                    value={`RECIBO|${receiptData.date}|${receiptData.total.toFixed(2)}|${receiptData.paymentMethod}`} 
+                    size={120} 
+                    level="L"
+                  />
+                  <p className="text-[10px] mt-2 text-slate-500">Consulte via QR Code</p>
+                </div>
+              </div>
+
+              <div className="print:hidden mt-8 flex gap-3">
+                <button
+                  onClick={() => setIsReceiptModalOpen(false)}
+                  className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-colors"
+                >
+                  Fechar
+                </button>
+                <button
+                  onClick={handlePrintReceipt}
+                  className="flex-[2] py-3 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-700 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Printer size={20} />
+                  Imprimir Cupom
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      {/* Closed Register Summary Modal */}
+      <AnimatePresence>
+        {closedRegisterSummary && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6 print:hidden">
+                <h3 className="text-2xl font-bold text-slate-900">Resumo do Caixa</h3>
+                <button 
+                  onClick={() => setClosedRegisterSummary(null)}
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div id="register-summary-content" className="space-y-4 font-mono text-sm text-black">
+                <div className="text-center mb-6">
+                  <h2 className="font-bold text-lg">{storeSettings.name}</h2>
+                  <p>FECHAMENTO DE CAIXA</p>
+                  <p className="text-xs mt-2">{new Date(closedRegisterSummary.closedAt).toLocaleString('pt-BR')}</p>
+                </div>
+
+                <div className="border-t border-dashed border-slate-300 pt-4 space-y-2">
+                  <div className="flex justify-between">
+                    <span>Valor Inicial (Troco):</span>
+                    <span>R$ {closedRegisterSummary.initialBalance.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Vendas (Dinheiro):</span>
+                    <span>R$ {closedRegisterSummary.salesMoney.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Vendas (Cartão/PIX):</span>
+                    <span>R$ {closedRegisterSummary.salesOther.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                <div className="border-t border-dashed border-slate-300 pt-4 space-y-2">
+                  <div className="flex justify-between font-bold">
+                    <span>Total Esperado (Caixa):</span>
+                    <span>R$ {closedRegisterSummary.expectedBalance.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between font-bold">
+                    <span>Valor Informado:</span>
+                    <span>R$ {closedRegisterSummary.finalBalance.toFixed(2)}</span>
+                  </div>
+                  <div className={`flex justify-between font-bold ${closedRegisterSummary.difference < 0 ? 'text-rose-600' : closedRegisterSummary.difference > 0 ? 'text-emerald-600' : ''}`}>
+                    <span>Diferença (Quebra):</span>
+                    <span>R$ {closedRegisterSummary.difference.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-8 flex gap-3 print:hidden">
+                <button 
+                  onClick={() => setClosedRegisterSummary(null)}
+                  className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-colors"
+                >
+                  Fechar
+                </button>
+                <button 
+                  onClick={() => {
+                    const printContent = document.getElementById('register-summary-content');
+                    if (!printContent) return;
+                    const printWindow = window.open('', '_blank');
+                    if (!printWindow) {
+                      alert('Por favor, permita popups para imprimir.');
+                      return;
+                    }
+                    printWindow.document.write(`
+                      <html>
+                        <head>
+                          <title>Fechamento de Caixa</title>
+                          <style>
+                            body { font-family: monospace; padding: 20px; color: #000; }
+                            .text-center { text-align: center; }
+                            .flex { display: flex; }
+                            .justify-between { justify-content: space-between; }
+                            .font-bold { font-weight: bold; }
+                            .text-lg { font-size: 1.125rem; }
+                            .text-xs { font-size: 0.75rem; }
+                            .mt-2 { margin-top: 0.5rem; }
+                            .mb-6 { margin-bottom: 1.5rem; }
+                            .pt-4 { padding-top: 1rem; }
+                            .space-y-2 > * + * { margin-top: 0.5rem; }
+                            .space-y-4 > * + * { margin-top: 1rem; }
+                            .border-t { border-top: 1px dashed #ccc; }
+                          </style>
+                        </head>
+                        <body>
+                          ${printContent.innerHTML}
+                        </body>
+                      </html>
+                    `);
+                    printWindow.document.close();
+                    printWindow.focus();
+                    setTimeout(() => printWindow.print(), 500);
+                  }}
+                  className="flex-[2] py-3 bg-sky-600 text-white rounded-xl font-bold hover:bg-sky-700 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Printer size={20} />
+                  Imprimir Resumo
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
